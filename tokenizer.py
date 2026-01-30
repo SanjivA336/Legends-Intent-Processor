@@ -1,189 +1,168 @@
-class Tokenizer: # Simple BPE Tokenizer
-    def __init__(self, source: str, source_is_trained: bool = False, iterations: int = 10, end_of_word: str = '</w>', unrecognized: str = '</u>'):
-        self.eow: str = end_of_word
-        self.urc: str = unrecognized
-        self.merge_table: list[str] = []
-        self.vocab: dict[str, int] = {self.eow: 0}
+import time
+import json
+import csv
 
-        if source_is_trained:
-            self.load(source) 
-        else:
-            self.train_large(source, iterations)
+class Tokenizer: # BPE Tokenizer
+    def __init__(self):
+        self.eow = "</w>"
+        self.urc = "�"
+        self.vocab: dict[str, int] = {self.urc: 0, self.eow: 1}
+        self.merge_table: list[tuple[str, str]] = []
 
-    def reset(self):
-        self.merge_table.clear()
-        self.vocab.clear()
-        self.vocab = {self.eow: 0}
+    def train(self, corpus_path, merges=1000, debug=True):
+        start_time = time.time()
 
-    def process_string(self, data) -> list[str]:
-        lines = data.split("\n")
-        words: list[str] = []
-        for line in lines:
-            words.extend(line.split(" "))
+        if debug:
+            print(f"Starting training at {start_time}...")
 
-        return words
+        with open(corpus_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                # Preprocess line
+                words = line.removesuffix("\n").strip().split(" ")
 
-    def train_large(self, source: str, iterations: int = 10, freq_threshold: int = 10):
-        self.reset()
-        for _ in range(iterations):        
-            word_freq: dict[list[int], int] = {}
-            pair_freq: dict[list[int], int] = {}
-            best_pair: list[int] | None = None
+                for word in words:
+                    # Tokenize word into characters + eow
+                    tokens = list(word) + [self.eow]
 
-            with open(source, 'r', encoding='utf-8') as file:
-                for line in file:
-                    # Process line into a list of words
-                    words: list[str] = self.process_string(line)
+                    # Build initial vocab with single characters
+                    for token in tokens:
+                        if token not in self.vocab:
+                            self.vocab[token] = len(self.vocab)
 
-                    # Update base vocab
+            if debug:
+                print(f"Starting Merges...\nTime Elapsed: {time.time() - start_time:.2f}s")
+
+            first_elapsed: float | None = None
+            for m in range(merges):
+                iteration_start_time = time.time()
+                best_pair: tuple[str, str] | None = None
+                self.pair_freq: dict[tuple[str, str], int] = {}
+                f.seek(0)
+                for line in f:
+                    # Preprocess line
+                    words = line.removesuffix("\n").strip().split(" ")
+
                     for word in words:
-                        for c in word:
-                            if c not in self.vocab:
-                                self.vocab[c] = len(self.vocab)
-                        
-                        # Update word frequencies
-                        word_freq[self.tokenize(word)[0]] = word_freq.get(self.tokenize(word)[0], 0) + 1
+                        # Retokenize words based on current merge table
+                        tokens = self.tokenize_word(word)
 
-                    # Find best token pair
-                    for word, freq in word_freq.items():
-                        for i in range(len(word) - 1):
-                            pair = [word[i]] + [word[i+1]]
-                            pair_freq[pair] = pair_freq.get(pair, 0) + freq
+                        # Count initial pair frequencies + find best pair
+                        for i in range(len(tokens) - 1):
+                            if tokens[i] == self.eow or tokens[i + 1] == self.eow:
+                                continue
 
-                            if best_pair is None or pair_freq[pair] > pair_freq.get(best_pair, 0):
+                            pair = (tokens[i], tokens[i + 1])
+                            self.pair_freq[pair] = self.pair_freq.get(pair, 0) + 1
+                            if best_pair is None or self.pair_freq[pair] > self.pair_freq.get(best_pair, 0):
                                 best_pair = pair
 
-                # Exit early if no best_pair is found
+                # Early Quit: No more pairs to merge
                 if best_pair is None:
-                    return
+                    break
 
-                # Exit early if best_pair is does not pass frequency threshold
-                if pair_freq.get(best_pair, 0) < freq_threshold:
-                    return
+                # Early Quit: Best pair frequency is less than 2
+                if self.pair_freq[best_pair] < 2:
+                    break
 
-                # Add best pair as a new token
-                best_pair_stringified = self.stringify([best_pair])[0]
-                best_pair_string = best_pair_stringified[0] + best_pair_stringified[1]
-                
-                self.vocab[best_pair_string] = len(self.vocab)
-                self.merge_table.append(best_pair_string)
+                # Merge best pair into vocab and update merge table if it isn't already present
+                if best_pair[0] + best_pair[1] not in self.vocab:
+                    self.vocab[best_pair[0] + best_pair[1]] = len(self.vocab)
+                    self.merge_table.append(best_pair)
 
-                # Replace all instances of pair with new token
-                for word, freq in word_freq.items():
-                    i = 0
-                    while i < len(word) - 1:
-                        if word[i] + word[i+1] == best_pair:
-                            word[i] = self.tokenize(best_pair_string)[0][0]
-                            word.pop(i+1)
-                        else:
-                            i += 1
-                            
-    def train_small(self, source: str, iterations: int = 10, freq_threshold: int = 10):
-        # Read data
-        data: str = ""
-        with open(source, 'r', encoding='utf-8') as file:
-            data = file.read()
-
-        # Process data into words
-        words = self.process_string(data)
-        
-        # Initialize vocab
-        self.vocab = {self.eow: 0}
-        for word in words:
-            for c in word:
-                if c not in self.vocab:
-                    self.vocab[c] = len(self.vocab)
-
-        # Process words into initial tokens
-        tokenized_words: list[list[str]] = []
-        for word in words:
-            tokenized_words.append(list(word) + [self.eow])
-
-        # Repeatedly merge most frequent token pairs
-        for _ in range(iterations):
-
-            # Find best token pair
-            best_pair: str | None = None
-            pair_freq: dict[str, int] = {}
-            for word in tokenized_words:
-                for i in range(len(word) - 1):
-                    pair = word[i] + word[i+1]
-                    pair_freq[pair] = pair_freq.get(pair, 0) + 1
-
-                    if best_pair is None or pair_freq[pair] > pair_freq.get(best_pair, 0):
-                        best_pair = pair
-
-            # Exit early if no best_pair is found
-            if best_pair is None:
-                return
-
-            # Exit early if best_pair is does not pass frequency threshold
-            if pair_freq.get(best_pair, 0) < freq_threshold:
-                return
-
-            # Add best pair as a new token
-            self.vocab[best_pair] = len(self.vocab)
-            self.merge_table.append(best_pair)
-
-            # Replaces all instances of pair with new token
-            for word in tokenized_words:
-                i = 0
-                while i < len(word) - 1:
-                    if word[i] + word[i+1] == best_pair:
-                        word[i] = best_pair
-                        word.pop(i+1)
+                if debug:
+                    elapsed = time.time() - iteration_start_time
+                    remaining = 0.0
+                    if first_elapsed is None:
+                        first_elapsed = elapsed
                     else:
-                        i += 1
+                        total_increase = elapsed - first_elapsed
+                        growth_rate = total_increase / (m + 1) # Assume linear growth
+                        remaining = (merges - (m + 1)) * (first_elapsed + growth_rate * (merges + m) / 2)
 
-    def tokenize(self, input: str) -> list[list[int]]:
-        # Process string into words
-        words = self.process_string(input)
 
-        result: list[list[int]] = []
-        # Tokenize based on merge table
+                    print(f"Merge #{m} Time\t->\tIteration Elapsed: {elapsed:.2f}s\tTotal Elapsed : {time.time() - start_time:.2f}s\tRemaining: {remaining:.2f}s\tBest Pair: {best_pair} -> \'{best_pair[0] + best_pair[1]}\'")
+
+    def tokenize_word(self, word: str) -> list[str]:
+        tokens = list(word) + [self.eow]
+
+        # Naive tokenization. No greedy matching.
+        for merge in self.merge_table:
+            i = 0
+            while i < len(tokens) - 1:
+                pair = (tokens[i], tokens[i + 1])
+                if pair == merge:
+                    tokens[i] = pair[0] + pair[1]
+                    tokens.pop(i + 1)
+                else:
+                    i += 1
+
+        return tokens
+    
+    def tokenize_line(self, line: str) -> list[str]:
+        words = line.removesuffix("\n").strip().split(" ")
+        tokenized_line = []
         for word in words:
-            tokens = list(word) + [self.eow]
-            for merged_pair in self.merge_table:
-                i = 0
-                while i < len(tokens) - 1:
-                    if tokens[i] + tokens[i+1] == merged_pair:
-                        tokens[i] = merged_pair
-                        tokens.pop(i+1)
-                    else:
-                        i += 1
-
-            result.append([self.vocab.get(token, -1) for token in tokens]) #-1 = self.urc
-
-        return result
+            tokenized_line.extend(self.tokenize_word(word))
+        return tokenized_line
     
-    def stringify(self, input: list[list[int]]) -> list[list[str]]:
-        result: list[list[str]] = []
-
-        reverse_vocab = {v: k for k, v in self.vocab.items()}
-
-        for token_group in input:
-            word: list[str] = []
-            for token in token_group:
-                word.append(reverse_vocab.get(token, self.urc))
-            result.append(word)
-
-        return result
-
-    def save(self, output: str) -> bool:
-        return True
-
-    def load(self, filepath: str) -> bool:
-        return True
+    def tokens_to_ids(self, tokens: list[str]) -> list[int]:
+        return [self.vocab.get(token, -1) for token in tokens]
     
-tokenizer = Tokenizer(
-    './data/tokenizer/book_corpus_small.txt',
-    False,
-    1
-)
+    def ids_to_tokens(self, ids: list[int]) -> list[str]:
+        inv_vocab = {v: k for k, v in self.vocab.items()}
+        return [inv_vocab.get(id_, self.urc) for id_ in ids]
+    
+    def save_vocab(self, path: str):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.vocab, f, ensure_ascii=False, indent=2)
 
-while True:
-    string = input("Give a string to tokenize:\n\t")
-    tokenized = tokenizer.tokenize(string)
-    stringified = tokenizer.stringify(tokenized)
-    print(f"\n\nTokenized Output:\n\t{tokenized}")
-    print(f"\n\nString Representation:\n\t{stringified}\n-----------------------------------")
+    def save_merges(self, path: str):
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["left", "right"])
+            for left, right in self.merge_table:
+                writer.writerow([left, right])
+
+    def save(self, root_path: str):
+        self.save_vocab(f"{root_path}_vocab.json")
+        self.save_merges(f"{root_path}_merges.csv")
+
+    def load_vocab(self, path: str):
+        import json
+        with open(path, "r", encoding="utf-8") as f:
+            self.vocab = json.load(f)
+
+    def load_merges(self, path: str):
+        import csv
+        self.merge_table = []
+        with open(path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                self.merge_table.append((row["left"], row["right"]))
+
+    def load(self, root_path: str):
+        self.load_vocab(f"{root_path}_vocab.json")
+        self.load_merges(f"{root_path}_merges.csv")
+
+
+
+bpe = Tokenizer()
+bpe.train('data/corpus_sm.txt', 100, debug=True)
+bpe.save_merges('saves/bpe_merges.csv')
+bpe.save_vocab('saves/bpe_vocab.json')
+tokenized = bpe.tokenize_line("hello world")
+print("Tokenized:", tokenized)
+ids = bpe.tokens_to_ids(tokenized)
+print("Token IDs:", ids)
+decoded_tokens = bpe.ids_to_tokens(ids)
+print("Decoded Tokens:", decoded_tokens)
+
+bpe2 = Tokenizer()
+bpe2.load_vocab('saves/bpe_vocab.json')
+bpe2.load_merges('saves/bpe_merges.csv')
+tokenized2 = bpe2.tokenize_line("hello world")
+print("Tokenized after loading:", tokenized2)
+ids2 = bpe2.tokens_to_ids(tokenized2)
+print("Token IDs after loading:", ids2)
+decoded_tokens2 = bpe2.ids_to_tokens(ids2)
+print("Decoded Tokens after loading:", decoded_tokens2)
