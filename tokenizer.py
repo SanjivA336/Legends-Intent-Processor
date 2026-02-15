@@ -1,13 +1,12 @@
-import time
 import json
 import csv
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import Counter
 
-def count_pairs_worker(chunk, merge_table, eow):
+def count_pairs_worker(chunk, merge_table, eow) -> Counter[tuple[str, str]]:
     local_counter = Counter()
     for line in chunk:
-        words = line.removesuffix("\n").strip().split(" ")
+        words = line.lower().removesuffix("\n").strip().split(" ")
         for word in words:
             tokens = list(word) + [eow]
             # Apply merges
@@ -30,23 +29,32 @@ class Tokenizer: # BPE Tokenizer
         self.eow = "</w>"
         self.urc = "�"
         self.vocab: dict[str, int] = {self.urc: 0, self.eow: 1}
+        self.inv_vocab: dict[int, str] = {0: self.urc, 1: self.eow}
         self.merge_table: list[tuple[str, str]] = []
 
-    def train(self, corpus_path, merges=1000, chunk_size=10000, max_workers=8, debug=True):
+    def train(self, corpus_path, merges=1000, chunk_size=10000, max_workers=8, limit=0.001, debug=True):
         import time
         start_time = time.time()
 
+        num_init_tokens = 0
         # Step 1: Build initial vocab sequentially
         if debug:
             print("Building initial vocab...")
         with open(corpus_path, 'r', encoding='utf-8') as f:
             for line in f:
-                words = line.removesuffix("\n").strip().split(" ")
+                words = line.lower().removesuffix("\n").strip().split(" ")
                 for word in words:
                     tokens = list(word) + [self.eow]
+                    num_init_tokens += len(tokens)
                     for token in tokens:
                         if token not in self.vocab:
                             self.vocab[token] = len(self.vocab)
+                            self.inv_vocab[len(self.inv_vocab)] = token
+
+        if debug:
+            print(f"Initial vocab size: {len(self.vocab)}")
+            print(f"Initial tokens count: {num_init_tokens}")
+            print(f"Time taken for initial vocab: {time.time() - start_time:.2f}s")
 
         # Step 2: Perform merges
         prev_time = time.time() - start_time
@@ -81,15 +89,16 @@ class Tokenizer: # BPE Tokenizer
                 break
 
             best_pair = max(pair_counter.items(), key=lambda kv: kv[1])[0]
-            if pair_counter[best_pair] < 2:
+            if pair_counter[best_pair] < (num_init_tokens * limit):
                 if debug:
-                    print("Best pair frequency < 2. Stopping.")
+                    print(f"Best pair frequency < {num_init_tokens * limit}. Stopping.")
                 break
 
             # Step 2e: Merge the pair
             merged_token = best_pair[0] + best_pair[1]
             if merged_token not in self.vocab:
                 self.vocab[merged_token] = len(self.vocab)
+                self.inv_vocab[len(self.inv_vocab)] = merged_token
                 self.merge_table.append(best_pair)
 
             if debug:
@@ -104,7 +113,7 @@ class Tokenizer: # BPE Tokenizer
                 prev_time = time.time() - merge_start_time
 
     def tokenize_word(self, word: str) -> list[str]:
-        tokens = list(word) + [self.eow]
+        tokens = list(word.lower()) + [self.eow]
 
         # Naive tokenization. No greedy matching.
         for merge in self.merge_table:
@@ -127,12 +136,20 @@ class Tokenizer: # BPE Tokenizer
         return tokenized_line
     
     def tokens_to_ids(self, tokens: list[str]) -> list[int]:
-        return [self.vocab.get(token, -1) for token in tokens]
-    
+        return [self.token_to_id(token) for token in tokens]
+
+    def token_to_id(self, token: str) -> int:
+        return self.vocab.get(token.lower(), 0)
+
     def ids_to_tokens(self, ids: list[int]) -> list[str]:
-        inv_vocab = {v: k for k, v in self.vocab.items()}
-        return [inv_vocab.get(id_, self.urc) for id_ in ids]
-    
+        return [self.id_to_token(id) for id in ids]
+
+    def id_to_token(self, id: int) -> str:
+        return self.inv_vocab.get(id, self.urc)
+
+    def vocab_size(self) -> int:
+        return len(self.vocab)
+
     def save_vocab(self, path: str):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.vocab, f, ensure_ascii=False, indent=2)
@@ -152,6 +169,7 @@ class Tokenizer: # BPE Tokenizer
         import json
         with open(path, "r", encoding="utf-8") as f:
             self.vocab = json.load(f)
+        self.inv_vocab = {id: token for token, id in self.vocab.items()}
 
     def load_merges(self, path: str):
         import csv
@@ -169,11 +187,10 @@ if __name__ == "__main__":
     import time
 
     bpe = Tokenizer()
-    bpe.train('data/corpus_md.txt', merges=100, chunk_size=10000, max_workers=8, debug=True)
-    bpe.save_vocab('saves/bpe_vocab.json')
-    bpe.save_merges('saves/bpe_merges.csv')
+    #bpe.train("data/corpus_sm.txt", merges=1000, chunk_size=20, debug=True)
+    bpe.load("saves/100md")
 
-    test_text = "hello world"
+    test_text = "The quick brown fox jumps over the lazy dog."
     tokenized = bpe.tokenize_line(test_text)
     print("Tokenized:", tokenized)
 
